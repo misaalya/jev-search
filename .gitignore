@@ -1,0 +1,13 @@
+node_modules/
+.env
+
+# Hanya tool-nya yang dipublikasikan. Catatan teknis, benchmark, dan repo uji tetap lokal.
+docs/
+scripts/
+playground/
+test-repos/
+playground/
+
+# Indeks buatan tool, bisa dibuat ulang kapan saja.
+.jev-index.json
+.codegraph/
