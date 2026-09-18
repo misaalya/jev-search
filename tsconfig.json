@@ -1,14 +1,14 @@
 {
-  // Only used for type checking (`npm run check`). Node runs the .ts files directly.
+  // Only used for type checking (`bun run check`). Bun runs the .ts files directly.
   "compilerOptions": {
-    "target": "es2023",
-    "module": "nodenext",
+    "target": "esnext",
+    "module": "preserve",
+    "moduleResolution": "bundler",
     "strict": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true,
-    "types": ["node"]
+    "types": ["bun"]
   },
   "include": ["src"]
 }

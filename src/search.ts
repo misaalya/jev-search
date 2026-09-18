@@ -30,6 +30,8 @@ const VERIFY_MIN = 0.7; // Noul verifikasi minimal agar fungsi dianggap hasil
 const VERIFY_COUNT = 6; // berapa simbol teratas yang diverifikasi (lebih banyak = hasil lebih lengkap)
 const MAX_ROUNDS = 8; // pengaman: jumlah request Jev maksimal
 const MAX_SNIPPET_LINES = 80; // potongan kode yang dikirim saat verifikasi
+const RELATED_POOL = 6; // kalau tidak ketemu: berapa kandidat "terdekat" yang dinilai di request terakhir
+const RELATED_COUNT = 3; // ...dan berapa yang dikembalikan
 
 // ---------- Kandidat ----------
 
@@ -47,10 +49,23 @@ export type Hit = {
   score: number; // Noul verifikasi: 0..1
 };
 
+/**
+ * Kode terdekat, dikembalikan HANYA kalau tidak ada hasil yang yakin. Bukan jawaban, hanya petunjuk.
+ * name/startLine/endLine kosong kalau kandidatnya file atau folder.
+ */
+export type Related = {
+  path: string;
+  name?: string;
+  startLine?: number;
+  endLine?: number;
+  related: number; // Noul 0..1: seberapa berkaitan dengan query
+  implements: number; // Noul 0..1: apakah kode ini sendiri yang mengerjakan query (rendah = bukan jawabannya)
+};
+
 /** Catatan tiap request, supaya kita bisa melihat apa yang terjadi (--verbose). */
 export type Step = {
   round: number;
-  type: "search" | "verify";
+  type: "search" | "verify" | "related";
   options: number;
   ms: number;
   tokens: number;
@@ -58,7 +73,14 @@ export type Step = {
   decision: string; // apa yang diputuskan kode setelah jawaban ini (untuk --verbose)
 };
 
-export type SearchResult = { hits: Hit[]; steps: Step[]; totalMs: number };
+/** status: "found" = hits berisi jawaban; "not_found" = hits kosong, lihat related untuk kode terdekat. */
+export type SearchResult = {
+  status: "found" | "not_found";
+  hits: Hit[];
+  related: Related[];
+  steps: Step[];
+  totalMs: number;
+};
 
 // ---------- Pohon folder dari indeks ----------
 
@@ -217,14 +239,28 @@ async function searchRound(query: string, list: Candidate[], tree: Tree) {
       type: "noul",
       instructions: `Does any candidate in \`candidates\` contain code responsible for: "${query}"?`,
     },
+    // Tanpa NONE, jadi selalu ada yang terdekat. Dipakai hanya kalau akhirnya tidak ketemu (lihat related()).
+    closest: {
+      type: "choice",
+      instructions:
+        `Which candidate in \`candidates\` is most closely related to: "${query}"? ` +
+        "Pick the closest one even if none of them implements it.",
+      criteria: Object.fromEntries(ids.map((id) => [id, null])),
+    },
   });
   const where = result.answers.where as ChoiceAnswer;
   const exists = (result.answers.exists as NoulAnswer).noul;
+  const closestAnswer = result.answers.closest as ChoiceAnswer;
+  const closest = ids
+    .map((id, i) => ({ candidate: list[i]!, p: closestAnswer.probabilities[id] ?? 0 }))
+    .sort((a, b) => b.p - a.p)
+    .slice(0, RELATED_POOL) // sebanyak yang bisa dinilai di request "kode terdekat"
+    .map((c) => c.candidate);
   // Urutkan kandidat dari peluang tertinggi. NONE tidak ikut, ia hanya sinyal "tidak ada".
   const ranked = ids
     .map((id, i) => ({ candidate: list[i]!, id, p: where.probabilities[id] ?? 0 }))
     .sort((a, b) => b.p - a.p);
-  return { result, where, exists, ranked };
+  return { result, where, exists, ranked, closest };
 }
 
 // ---------- Verifikasi ----------
@@ -267,6 +303,65 @@ async function verify(query: string, symbols: Extract<Candidate, { kind: "symbol
   return { result, scores };
 }
 
+// ---------- Kode terdekat (kalau tidak ketemu) ----------
+
+/**
+ * Satu request: untuk tiap kandidat terdekat, dua Noul dijawab paralel:
+ *   related    = seberapa berkaitan dengan query
+ *   implements = apakah kode ini sendiri yang mengerjakannya (sama dengan verifikasi)
+ * Simbol dikirim bersama kode aslinya; file/folder dikirim keterangannya saja.
+ */
+async function related(query: string, candidates: Candidate[], tree: Tree, root: string) {
+  const ids = candidates.map((_, i) => "C" + (i + 1));
+  const state = {
+    candidates: Object.fromEntries(
+      ids.map((id, i) => {
+        const c = candidates[i]!;
+        if (c.kind !== "symbol") return [id, describe(c, tree)];
+        return [id, { file: c.file.path, name: c.symbol.name, lines: `${c.symbol.startLine}-${c.symbol.endLine}`, code: snippet(root, c) }];
+      }),
+    ),
+  };
+  const questions = Object.fromEntries(
+    ids.flatMap((id) => [
+      [
+        `${id}_related`,
+        {
+          type: "noul" as const,
+          instructions: `Is the code in \`candidates.${id}\` related to: "${query}"?`,
+          criteria: {
+            true: "It handles the same kind of data or a part of that task, or is where that task would naturally be added",
+            false: "It is about something else",
+          },
+        },
+      ],
+      [
+        `${id}_implements`,
+        {
+          type: "noul" as const,
+          instructions: `Is the code in \`candidates.${id}\` responsible for: "${query}"?`,
+          criteria: {
+            true: "This code itself implements that behavior",
+            false: "This code is unrelated, or only calls, mentions, or tests it",
+          },
+        },
+      ],
+    ]),
+  );
+  const result = await askJev(state, questions);
+  const items: Related[] = candidates.map((c, i) => {
+    const scores = {
+      related: (result.answers[`${ids[i]}_related`] as NoulAnswer).noul,
+      implements: (result.answers[`${ids[i]}_implements`] as NoulAnswer).noul,
+    };
+    if (c.kind === "symbol") {
+      return { path: c.file.path, name: c.symbol.name, startLine: c.symbol.startLine, endLine: c.symbol.endLine, ...scores };
+    }
+    return { path: c.kind === "file" ? c.file.path : c.path || ".", ...scores };
+  });
+  return { result, items: items.sort((a, b) => b.related - a.related) };
+}
+
 // ---------- Loop utama ----------
 
 export async function search(query: string, index: Index): Promise<SearchResult> {
@@ -275,7 +370,18 @@ export async function search(query: string, index: Index): Promise<SearchResult>
   const steps: Step[] = [];
   const backup: { candidate: Candidate; p: number }[] = []; // antrean cadangan
   const verified = new Set<string>(); // simbol yang sudah pernah diverifikasi
-  const finish = (hits: Hit[]): SearchResult => ({ hits, steps, totalMs: Math.round(performance.now() - started) });
+  // Bahan "kode terdekat" kalau akhirnya tidak ketemu:
+  const nearMisses: { candidate: Candidate; score: number }[] = []; // simbol yang gagal verifikasi
+  const closestSeen: Candidate[] = []; // pilihan "closest" tiap putaran, urut ditemukan
+  let lastSearchList: Candidate[] = []; // daftar kandidat putaran penelusuran terakhir
+  let askedAgain = false; // "tanya ulang tanpa yang ditolak" hanya sekali per pencarian
+  const finish = (hits: Hit[], relatedItems: Related[] = []): SearchResult => ({
+    status: hits.length > 0 ? "found" : "not_found",
+    hits,
+    related: relatedItems,
+    steps,
+    totalMs: Math.round(performance.now() - started),
+  });
 
   /** Ambil cadangan terbaik untuk dicoba. Kosong = tidak ada jalan lain lagi. */
   const fromBackup = (): Candidate[] => {
@@ -312,15 +418,26 @@ export async function search(query: string, index: Index): Promise<SearchResult>
           steps.at(-1)!.decision = `${hits.length} passed (>= ${VERIFY_MIN}) → DONE`;
           return finish(hits);
         }
+        symbols.forEach((c, i) => nearMisses.push({ candidate: c, score: scores[i]! }));
         steps.at(-1)!.decision = `none passed (>= ${VERIFY_MIN}) → backtrack to backup queue`;
       }
       // Verifikasi gagal → mundur, coba cadangan (backtracking).
       list = nextList(fromBackup(), tree);
+      // Cadangan habis: bisa jadi Jev tertipu nama di putaran sebelumnya dan terlalu yakin, sehingga kandidat
+      // lain peluangnya ±0 dan tidak masuk cadangan. Tanya sekali lagi dengan daftar yang sama, tanpa yang sudah
+      // ditolak verifikasi. (Contoh: "delete a comment" → deleteComment ditolak → createComment.)
+      if (list.length === 0 && !askedAgain) {
+        askedAgain = true;
+        list = lastSearchList.filter((c) => !verified.has(keyOf(c)));
+        if (steps.at(-1)?.type === "verify") steps.at(-1)!.decision += " | backup empty → ask again without the rejected candidates";
+      }
       continue;
     }
 
     // ---- Tahap PENELUSURAN: tanya Jev mana yang paling cocok.
-    const { result, where, exists, ranked } = await searchRound(query, list, tree);
+    lastSearchList = list;
+    const { result, where, exists, ranked, closest } = await searchRound(query, list, tree);
+    closestSeen.push(...closest);
     const top = ranked.slice(0, 3).map((r) => `${label(r.candidate)}=${r.p.toFixed(2)}`).join("  ");
     const step: Step = {
       round,
@@ -365,5 +482,36 @@ export async function search(query: string, index: Index): Promise<SearchResult>
       ` | CHECK 3: ${allSymbols ? `all symbols → verify top ${toVerify.length}` : "open beam + flatten → next round"}`;
   }
 
-  return finish([]); // tidak ketemu / kehabisan putaran
+  // Tidak ketemu / kehabisan putaran: jangan kembalikan kosong, beri kode terdekat beserta nilainya,
+  // supaya agent tahu seberapa dekat (dan bahwa itu BUKAN jawabannya).
+  // Urutan prioritas: simbol yang hampir lolos verifikasi (nilai tertinggi dulu), lalu pilihan "closest":
+  // simbol dulu, lalu file, lalu folder (makin spesifik makin berguna). Duplikat dibuang.
+  const rank = { symbol: 0, file: 1, dir: 2 };
+  const ordered = [
+    ...nearMisses.sort((a, b) => b.score - a.score).map((n) => n.candidate),
+    ...closestSeen.map((c, i) => ({ c, i })).sort((a, b) => rank[a.c.kind] - rank[b.c.kind] || a.i - b.i).map((x) => x.c),
+  ];
+  const pool = ordered.filter((c, i) => ordered.findIndex((o) => keyOf(o) === keyOf(c)) === i).slice(0, RELATED_POOL);
+  if (pool.length === 0) return finish([]);
+  const { result, items } = await related(query, pool, tree, index.root);
+  // Pertanyaan "implements" di sini sama dengan verifikasi (kode asli dibaca). Jadi simbol yang lolos batas
+  // tetap dijadikan hasil. Terjadi kalau pencarian berhenti tanpa verifikasi (misalnya CEK 1 karena nama
+  // yang jelek membuat "exists" rendah).
+  const passed: Hit[] = items
+    .filter((r) => r.name !== undefined && r.implements >= VERIFY_MIN)
+    .map((r) => ({ path: r.path, name: r.name!, startLine: r.startLine!, endLine: r.endLine!, score: r.implements }))
+    .sort((a, b) => b.score - a.score);
+  const top = items.slice(0, RELATED_COUNT);
+  steps.push({
+    round: steps.length + 1,
+    type: "related",
+    options: pool.length,
+    ms: result.ms,
+    tokens: result.inputTokens,
+    note: items.map((r) => `${r.path}${r.name ? " › " + r.name : ""}=${r.related.toFixed(2)}/${r.implements.toFixed(2)}`).join("  "),
+    decision: passed.length
+      ? `${passed.length} passed implements (>= ${VERIFY_MIN}) → DONE`
+      : `no confident match → return the ${top.length} closest as "related" (related/implements scores)`,
+  });
+  return passed.length ? finish(passed) : finish([], top);
 }

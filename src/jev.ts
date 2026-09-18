@@ -2,7 +2,7 @@
  * JEV — pembungkus kecil untuk memanggil TypeSafe System One API.
  *
  * Satu request = satu "state" (bahan bacaan) + beberapa "questions" yang dijawab paralel.
- * Kita memakai fetch biasa (bawaan Node) supaya base URL persis mengikuti .env:
+ * Kita memakai fetch biasa (bawaan Bun) supaya base URL persis mengikuti .env:
  *   POST {TYPESAFE_BASE_URL}/systemone
  * Lihat docs/04-jev-request.md.
  */
