@@ -1,5 +1,5 @@
 {
-  "name": "jev-traversal",
+  "name": "jev-search",
   "version": "0.1.0",
   "description": "Fast semantic code search: TypeSafe Jev walks the repo folder → file → function.",
   "type": "module",

@@ -21,7 +21,7 @@ import { parseEnv } from "node:util";
 import { INDEX_FILE, updateIndex, type Index } from "./indexer.ts";
 import { search } from "./search.ts";
 
-// .env diambil dari folder proyek jev-traversal ini (bukan dari repo yang dicari).
+// .env diambil dari folder proyek jev-search ini (bukan dari repo yang dicari).
 // Bun hanya otomatis membaca .env di folder saat ini, jadi kita baca sendiri.
 // Nilai yang sudah ada di environment tidak ditimpa.
 const envFile = join(dirname(import.meta.dirname), ".env");

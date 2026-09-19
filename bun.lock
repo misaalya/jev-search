@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "jev-traversal",
+      "name": "jev-search",
       "dependencies": {
         "typescript": "^5.9.3",
       },

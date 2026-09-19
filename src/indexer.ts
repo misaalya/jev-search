@@ -13,7 +13,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
 
 // ---------- Bentuk data indeks ----------
@@ -78,7 +78,8 @@ function listFiles(root: string): string[] {
       maxBuffer: 64 * 1024 * 1024,
       stdio: ["ignore", "pipe", "ignore"], // sembunyikan pesan error git kalau folder ini bukan git repo
     });
-    paths = out.split("\n").filter(Boolean);
+    // `--cached` juga menyebut file yang sudah dihapus tapi belum di-commit: buang yang tidak ada lagi.
+    paths = out.split("\n").filter((p) => p && existsSync(join(root, p)));
   } catch {
     paths = [];
   }
