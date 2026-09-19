@@ -95,11 +95,11 @@ if (command === "index") {
       if (result.related.length > 0) console.log("Closest related code (not a match):");
       for (const r of result.related) {
         const where = r.name ? `${r.path}:${r.startLine}-${r.endLine}  ${r.name}` : r.path;
-        console.log(`  ${where}  (related ${r.related.toFixed(2)}, implements ${r.implements.toFixed(2)})`);
+        console.log(`  ${where}  (related ${r.related.toFixed(2)}, implements ${r.implements.toFixed(2)}, main ${r.main.toFixed(2)})`);
       }
     }
     for (const hit of result.hits) {
-      console.log(`${hit.path}:${hit.startLine}-${hit.endLine}  ${hit.name}  (${hit.score.toFixed(2)})`);
+      console.log(`${hit.path}:${hit.startLine}-${hit.endLine}  ${hit.name}  (${hit.score.toFixed(2)}, main ${hit.main.toFixed(2)})`);
     }
     const requests = result.steps.length;
     console.log(`\n${requests} Jev requests, ${result.totalMs} ms`);

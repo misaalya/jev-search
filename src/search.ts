@@ -25,6 +25,7 @@ const MAX_STATE_CHARS = 24_000; // ±6.000 token; batas Jev 32k token, tapi stat
 const BEAM = 2; // berapa kandidat teratas yang dibawa ke putaran berikutnya
 const WIDE_BEAM = 4; // ...kalau Jev sedang ragu
 const LOW_CONFIDENCE = 0.5; // di bawah ini = Jev ragu
+const STILL_POSSIBLE = 0.01; // peluang ≥ ini (bukan 0) ikut beam sampai WIDE_BEAM; Jev membulatkan ke 0.01
 const EXISTS_MIN = 0.3; // Noul "exists" di bawah ini = tidak ada yang relevan
 const VERIFY_MIN = 0.7; // Noul verifikasi minimal agar fungsi dianggap hasil
 const VERIFY_COUNT = 6; // berapa simbol teratas yang diverifikasi (lebih banyak = hasil lebih lengkap)
@@ -47,6 +48,9 @@ export type Hit = {
   startLine: number;
   endLine: number;
   score: number; // Noul verifikasi: 0..1
+  // Noul 0..1: tempat utama yang mengerjakan query (tinggi) atau helper kecil yang dipakai kode lain (rendah).
+  // Hanya informasi untuk pembaca/agent; tidak ikut menentukan lolos atau urutan.
+  main: number;
 };
 
 /**
@@ -60,6 +64,7 @@ export type Related = {
   endLine?: number;
   related: number; // Noul 0..1: seberapa berkaitan dengan query
   implements: number; // Noul 0..1: apakah kode ini sendiri yang mengerjakan query (rendah = bukan jawabannya)
+  main: number; // Noul 0..1: tempat utama (tinggi) atau helper kecil (rendah), sama dengan Hit.main
 };
 
 /** Catatan tiap request, supaya kita bisa melihat apa yang terjadi (--verbose). */
@@ -274,7 +279,35 @@ function snippet(root: string, candidate: Extract<Candidate, { kind: "symbol" }>
   return end < endLine ? code + `\n// … (${endLine - end} more lines)` : code;
 }
 
-/** Satu request: satu Noul per kandidat, semua dijawab paralel oleh Jev. */
+/** Pertanyaan verifikasi: apakah kode ini sendiri yang mengerjakan query? Dipakai verify() dan related(). */
+function implementsQuestion(id: string, query: string) {
+  return {
+    type: "noul" as const,
+    instructions: `Is the code in \`candidates.${id}\` responsible for: "${query}"?`,
+    criteria: {
+      true: "This code itself implements that behavior",
+      false: "This code is unrelated, or only calls, mentions, or tests it",
+    },
+  };
+}
+
+/**
+ * Pertanyaan "utama atau helper?": membedakan fungsi yang menjalankan alur utama (contoh: handler login yang
+ * memvalidasi, cek password, buat sesi, set cookie) dari helper kecil yang hanya satu bagiannya (contoh: set cookie).
+ * Keduanya bisa lolos verifikasi; nilai ini memberi tahu yang mana. Lihat docs/14-scattered-auth.md.
+ */
+function mainQuestion(id: string, query: string) {
+  return {
+    type: "noul" as const,
+    instructions: `Is the code in \`candidates.${id}\` the main place that carries out: "${query}"?`,
+    criteria: {
+      true: "It runs the overall flow or holds most of the logic for this task",
+      false: "It is a small helper that handles only one piece, and other code puts the pieces together",
+    },
+  };
+}
+
+/** Satu request: per kandidat dua Noul (implements + main), semua dijawab paralel oleh Jev. */
 async function verify(query: string, symbols: Extract<Candidate, { kind: "symbol" }>[], root: string) {
   const ids = symbols.map((_, i) => "C" + (i + 1));
   const state = {
@@ -286,29 +319,24 @@ async function verify(query: string, symbols: Extract<Candidate, { kind: "symbol
     ),
   };
   const questions = Object.fromEntries(
-    ids.map((id) => [
-      id,
-      {
-        type: "noul" as const,
-        instructions: `Is the code in \`candidates.${id}\` responsible for: "${query}"?`,
-        criteria: {
-          true: "This code itself implements that behavior",
-          false: "This code is unrelated, or only calls, mentions, or tests it",
-        },
-      },
+    ids.flatMap((id) => [
+      [id, implementsQuestion(id, query)],
+      [`${id}_main`, mainQuestion(id, query)],
     ]),
   );
   const result = await askJev(state, questions);
   const scores = ids.map((id) => (result.answers[id] as NoulAnswer).noul);
-  return { result, scores };
+  const mains = ids.map((id) => (result.answers[`${id}_main`] as NoulAnswer).noul);
+  return { result, scores, mains };
 }
 
 // ---------- Kode terdekat (kalau tidak ketemu) ----------
 
 /**
- * Satu request: untuk tiap kandidat terdekat, dua Noul dijawab paralel:
+ * Satu request: untuk tiap kandidat terdekat, tiga Noul dijawab paralel:
  *   related    = seberapa berkaitan dengan query
  *   implements = apakah kode ini sendiri yang mengerjakannya (sama dengan verifikasi)
+ *   main       = tempat utama atau helper kecil (sama dengan verifikasi)
  * Simbol dikirim bersama kode aslinya; file/folder dikirim keterangannya saja.
  */
 async function related(query: string, candidates: Candidate[], tree: Tree, root: string) {
@@ -335,17 +363,8 @@ async function related(query: string, candidates: Candidate[], tree: Tree, root:
           },
         },
       ],
-      [
-        `${id}_implements`,
-        {
-          type: "noul" as const,
-          instructions: `Is the code in \`candidates.${id}\` responsible for: "${query}"?`,
-          criteria: {
-            true: "This code itself implements that behavior",
-            false: "This code is unrelated, or only calls, mentions, or tests it",
-          },
-        },
-      ],
+      [`${id}_implements`, implementsQuestion(id, query)],
+      [`${id}_main`, mainQuestion(id, query)],
     ]),
   );
   const result = await askJev(state, questions);
@@ -353,6 +372,7 @@ async function related(query: string, candidates: Candidate[], tree: Tree, root:
     const scores = {
       related: (result.answers[`${ids[i]}_related`] as NoulAnswer).noul,
       implements: (result.answers[`${ids[i]}_implements`] as NoulAnswer).noul,
+      main: (result.answers[`${ids[i]}_main`] as NoulAnswer).noul,
     };
     if (c.kind === "symbol") {
       return { path: c.file.path, name: c.symbol.name, startLine: c.symbol.startLine, endLine: c.symbol.endLine, ...scores };
@@ -383,10 +403,15 @@ export async function search(query: string, index: Index): Promise<SearchResult>
     totalMs: Math.round(performance.now() - started),
   });
 
-  /** Ambil cadangan terbaik untuk dicoba. Kosong = tidak ada jalan lain lagi. */
+  /**
+   * Ambil cadangan terbaik untuk dicoba. Kosong = tidak ada jalan lain lagi.
+   * Diambil 4 (WIDE_BEAM), bukan 2: cadangan adalah pilihan yang tidak diunggulkan Jev, jadi situasinya sama
+   * dengan "Jev ragu" di CEK 2. Tetap 1 request (isinya digabung dan dibatasi flatten), tapi lebih jarang perlu
+   * mundur dua kali. Lihat docs/03-search-loop.md.
+   */
   const fromBackup = (): Candidate[] => {
     backup.sort((a, b) => b.p - a.p);
-    return backup.splice(0, BEAM).map((b) => b.candidate);
+    return backup.splice(0, WIDE_BEAM).map((b) => b.candidate);
   };
 
   // Mulai dari root repo, langsung diratakan sejauh muat.
@@ -399,20 +424,20 @@ export async function search(query: string, index: Index): Promise<SearchResult>
       const symbols = list.filter((c) => !verified.has(keyOf(c))) as Extract<Candidate, { kind: "symbol" }>[];
       symbols.forEach((c) => verified.add(keyOf(c)));
       if (symbols.length > 0) {
-        const { result, scores } = await verify(query, symbols, index.root);
+        const { result, scores, mains } = await verify(query, symbols, index.root);
         steps.push({
           round,
           type: "verify",
           options: symbols.length,
           ms: result.ms,
           tokens: result.inputTokens,
-          note: symbols.map((c, i) => `${label(c)}=${scores[i]!.toFixed(2)}`).join("  "),
+          note: symbols.map((c, i) => `${label(c)}=${scores[i]!.toFixed(2)} (main ${mains[i]!.toFixed(2)})`).join("  "),
           decision: "",
         });
         const hits = symbols
-          .map((c, i) => ({ c, score: scores[i]! }))
+          .map((c, i) => ({ c, score: scores[i]!, main: mains[i]! }))
           .filter((h) => h.score >= VERIFY_MIN)
-          .map(({ c, score }) => ({ path: c.file.path, name: c.symbol.name, startLine: c.symbol.startLine, endLine: c.symbol.endLine, score }))
+          .map(({ c, score, main }) => ({ path: c.file.path, name: c.symbol.name, startLine: c.symbol.startLine, endLine: c.symbol.endLine, score, main }))
           .sort((a, b) => b.score - a.score);
         if (hits.length > 0) {
           steps.at(-1)!.decision = `${hits.length} passed (>= ${VERIFY_MIN}) → DONE`;
@@ -462,9 +487,15 @@ export async function search(query: string, index: Index): Promise<SearchResult>
 
     // CEK 2: Jev ragu → bawa lebih banyak kandidat.
     const width = where.confidence < LOW_CONFIDENCE ? WIDE_BEAM : BEAM;
-    const beam = ranked.slice(0, width).map((r) => r.candidate);
+    // Kandidat yang masih punya peluang ikut dibawa, sampai WIDE_BEAM. Jev membulatkan peluang ke 0.01, jadi
+    // di belakang juara (misal 0.96) biasanya hanya ada 1–3 kandidat kecil (0.01–0.07), lalu sisanya 0.
+    // Urutan kandidat-kandidat kecil itu berubah-ubah antar-run, jadi memotong di 2 = untung-untungan.
+    // Lihat docs/14-scattered-auth.md.
+    let size = width;
+    while (size < WIDE_BEAM && size < ranked.length && ranked[size]!.p >= STILL_POSSIBLE) size++;
+    const beam = ranked.slice(0, size).map((r) => r.candidate);
     // Sisanya masuk antrean cadangan (yang peluangnya hampir nol tidak perlu disimpan).
-    for (const r of ranked.slice(width)) if (r.p >= 0.02) backup.push({ candidate: r.candidate, p: r.p });
+    for (const r of ranked.slice(size)) if (r.p >= 0.02) backup.push({ candidate: r.candidate, p: r.p });
 
     // CEK 3: semua sudah simbol → putaran berikutnya adalah verifikasi. Yang diverifikasi bukan hanya
     //        isi beam, tapi sampai VERIFY_COUNT simbol teratas, supaya hasilnya lebih lengkap.
@@ -477,7 +508,9 @@ export async function search(query: string, index: Index): Promise<SearchResult>
     list = allSymbols ? toVerify : nextList(beam, tree);
     step.decision =
       (hasFolders && (exists < EXISTS_MIN || where.choice === "NONE") ? "CHECK 1: low exists but list still has folders → go one level deeper anyway | " : "") +
-      `CHECK 2: conf ${where.confidence < LOW_CONFIDENCE ? "< " + LOW_CONFIDENCE + " (unsure) → wide" : ">= " + LOW_CONFIDENCE + " → normal"} beam of ${width}: ` +
+      `CHECK 2: conf ${where.confidence < LOW_CONFIDENCE ? "< " + LOW_CONFIDENCE + " (unsure) → wide" : ">= " + LOW_CONFIDENCE + " → normal"} beam of ${width}` +
+      (size > width ? ` + ${size - width} still possible (>= ${STILL_POSSIBLE})` : "") +
+      ": " +
       beam.map(label).join(", ") +
       ` | CHECK 3: ${allSymbols ? `all symbols → verify top ${toVerify.length}` : "open beam + flatten → next round"}`;
   }
@@ -499,7 +532,7 @@ export async function search(query: string, index: Index): Promise<SearchResult>
   // yang jelek membuat "exists" rendah).
   const passed: Hit[] = items
     .filter((r) => r.name !== undefined && r.implements >= VERIFY_MIN)
-    .map((r) => ({ path: r.path, name: r.name!, startLine: r.startLine!, endLine: r.endLine!, score: r.implements }))
+    .map((r) => ({ path: r.path, name: r.name!, startLine: r.startLine!, endLine: r.endLine!, score: r.implements, main: r.main }))
     .sort((a, b) => b.score - a.score);
   const top = items.slice(0, RELATED_COUNT);
   steps.push({
