@@ -14,7 +14,7 @@ Perintah:
 ```bash
 bun src/cli.ts search [repo] "<query>"        # cari kode; indeks (.jev-index.json) dibuat/diperbarui otomatis
 bun src/cli.ts index  [repo]                  # buat ulang indeks dari nol (biasanya tidak perlu)
-  --json      # keluaran JSON untuk agent: status found/not_found, hits, related
+  --json      # keluaran JSON untuk agent: status found/partial/not_found, message, hits, related
   --verbose   # tampilkan setiap putaran Jev
 ```
 

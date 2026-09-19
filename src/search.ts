@@ -65,6 +65,7 @@ export type Related = {
   related: number; // Noul 0..1: seberapa berkaitan dengan query
   implements: number; // Noul 0..1: apakah kode ini sendiri yang mengerjakan query (rendah = bukan jawabannya)
   main: number; // Noul 0..1: tempat utama (tinggi) atau helper kecil (rendah), sama dengan Hit.main
+  part: number; // Noul 0..1: apakah kode ini mengerjakan SATU BAGIAN dari query (bagian lain ada di kode lain)
 };
 
 /** Catatan tiap request, supaya kita bisa melihat apa yang terjadi (--verbose). */
@@ -78,9 +79,17 @@ export type Step = {
   decision: string; // apa yang diputuskan kode setelah jawaban ini (untuk --verbose)
 };
 
-/** status: "found" = hits berisi jawaban; "not_found" = hits kosong, lihat related untuk kode terdekat. */
+/**
+ * status:
+ *   "found"     = hits berisi jawaban.
+ *   "partial"   = tidak ada satu kode yang mengerjakan semuanya, tapi bagian-bagiannya ada (part >= 0.7);
+ *                 bagian itu ada di related, paling atas. Contoh: query "A dan B" yang dikerjakan dua fungsi.
+ *   "not_found" = hits kosong; related hanya kode terdekat, bukan jawaban.
+ * message: satu kalimat bahasa Inggris untuk agent, menjelaskan arti status.
+ */
 export type SearchResult = {
-  status: "found" | "not_found";
+  status: "found" | "partial" | "not_found";
+  message: string;
   hits: Hit[];
   related: Related[];
   steps: Step[];
@@ -333,10 +342,27 @@ async function verify(query: string, symbols: Extract<Candidate, { kind: "symbol
 // ---------- Kode terdekat (kalau tidak ketemu) ----------
 
 /**
- * Satu request: untuk tiap kandidat terdekat, tiga Noul dijawab paralel:
+ * Pertanyaan "satu bagian?": membedakan "kodenya ada tapi tersebar" (status partial) dari "memang tidak ada"
+ * (not_found). Tidak bisa diganti implements rendah: implements = peluang jawabannya "ya", bukan persentase
+ * seberapa banyak yang dikerjakan.
+ */
+function partQuestion(id: string, query: string) {
+  return {
+    type: "noul" as const,
+    instructions: `Does the code in \`candidates.${id}\` carry out one part of: "${query}"?`,
+    criteria: {
+      true: "It implements one piece of that behavior, and other code handles the rest",
+      false: "It does not implement any piece of that behavior",
+    },
+  };
+}
+
+/**
+ * Satu request: untuk tiap kandidat terdekat, empat Noul dijawab paralel:
  *   related    = seberapa berkaitan dengan query
  *   implements = apakah kode ini sendiri yang mengerjakannya (sama dengan verifikasi)
  *   main       = tempat utama atau helper kecil (sama dengan verifikasi)
+ *   part       = apakah kode ini mengerjakan satu bagian dari query (untuk status partial)
  * Simbol dikirim bersama kode aslinya; file/folder dikirim keterangannya saja.
  */
 async function related(query: string, candidates: Candidate[], tree: Tree, root: string) {
@@ -365,6 +391,7 @@ async function related(query: string, candidates: Candidate[], tree: Tree, root:
       ],
       [`${id}_implements`, implementsQuestion(id, query)],
       [`${id}_main`, mainQuestion(id, query)],
+      [`${id}_part`, partQuestion(id, query)],
     ]),
   );
   const result = await askJev(state, questions);
@@ -373,6 +400,7 @@ async function related(query: string, candidates: Candidate[], tree: Tree, root:
       related: (result.answers[`${ids[i]}_related`] as NoulAnswer).noul,
       implements: (result.answers[`${ids[i]}_implements`] as NoulAnswer).noul,
       main: (result.answers[`${ids[i]}_main`] as NoulAnswer).noul,
+      part: (result.answers[`${ids[i]}_part`] as NoulAnswer).noul,
     };
     if (c.kind === "symbol") {
       return { path: c.file.path, name: c.symbol.name, startLine: c.symbol.startLine, endLine: c.symbol.endLine, ...scores };
@@ -395,8 +423,14 @@ export async function search(query: string, index: Index): Promise<SearchResult>
   const closestSeen: Candidate[] = []; // pilihan "closest" tiap putaran, urut ditemukan
   let lastSearchList: Candidate[] = []; // daftar kandidat putaran penelusuran terakhir
   let askedAgain = false; // "tanya ulang tanpa yang ditolak" hanya sekali per pencarian
-  const finish = (hits: Hit[], relatedItems: Related[] = []): SearchResult => ({
-    status: hits.length > 0 ? "found" : "not_found",
+  const finish = (hits: Hit[], relatedItems: Related[] = [], partial = false): SearchResult => ({
+    status: hits.length > 0 ? "found" : partial ? "partial" : "not_found",
+    message:
+      hits.length > 0
+        ? "Found code that implements this."
+        : partial
+          ? "No single piece of code does all of this, but parts of it were found; see related (parts listed first)."
+          : "No code implements this. The related entries are only the closest code, not a match.",
     hits,
     related: relatedItems,
     steps,
@@ -534,17 +568,25 @@ export async function search(query: string, index: Index): Promise<SearchResult>
     .filter((r) => r.name !== undefined && r.implements >= VERIFY_MIN)
     .map((r) => ({ path: r.path, name: r.name!, startLine: r.startLine!, endLine: r.endLine!, score: r.implements, main: r.main }))
     .sort((a, b) => b.score - a.score);
-  const top = items.slice(0, RELATED_COUNT);
+  // Tidak ada yang mengerjakan semuanya, tapi ada yang mengerjakan satu bagian → partial. Bagian-bagian itu
+  // ditaruh paling atas, supaya tidak terpotong RELATED_COUNT.
+  const isPart = (r: Related) => r.part >= VERIFY_MIN;
+  const partial = items.some(isPart);
+  const top = [...items.filter(isPart), ...items.filter((r) => !isPart(r))].slice(0, RELATED_COUNT);
   steps.push({
     round: steps.length + 1,
     type: "related",
     options: pool.length,
     ms: result.ms,
     tokens: result.inputTokens,
-    note: items.map((r) => `${r.path}${r.name ? " › " + r.name : ""}=${r.related.toFixed(2)}/${r.implements.toFixed(2)}`).join("  "),
+    note: items
+      .map((r) => `${r.path}${r.name ? " › " + r.name : ""}=${r.related.toFixed(2)}/${r.implements.toFixed(2)}/part ${r.part.toFixed(2)}`)
+      .join("  "),
     decision: passed.length
       ? `${passed.length} passed implements (>= ${VERIFY_MIN}) → DONE`
-      : `no confident match → return the ${top.length} closest as "related" (related/implements scores)`,
+      : partial
+        ? `no single match, but ${items.filter(isPart).length} do one part (part >= ${VERIFY_MIN}) → PARTIAL`
+        : `no confident match → return the ${top.length} closest as "related" (related/implements scores)`,
   });
-  return passed.length ? finish(passed) : finish([], top);
+  return passed.length ? finish(passed) : finish([], top, partial);
 }

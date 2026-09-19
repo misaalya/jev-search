@@ -90,12 +90,13 @@ if (command === "index") {
       }
       console.log();
     }
-    if (result.status === "not_found") {
-      console.log("No confident match (nothing scored >= 0.70 for implementing this).");
-      if (result.related.length > 0) console.log("Closest related code (not a match):");
+    if (result.status !== "found") {
+      console.log(result.message);
       for (const r of result.related) {
         const where = r.name ? `${r.path}:${r.startLine}-${r.endLine}  ${r.name}` : r.path;
-        console.log(`  ${where}  (related ${r.related.toFixed(2)}, implements ${r.implements.toFixed(2)}, main ${r.main.toFixed(2)})`);
+        console.log(
+          `  ${where}  (related ${r.related.toFixed(2)}, implements ${r.implements.toFixed(2)}, part ${r.part.toFixed(2)}, main ${r.main.toFixed(2)})`,
+        );
       }
     }
     for (const hit of result.hits) {
