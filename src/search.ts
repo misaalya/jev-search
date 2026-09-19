@@ -30,7 +30,8 @@ const EXISTS_MIN = 0.3; // Noul "exists" di bawah ini = tidak ada yang relevan
 const VERIFY_MIN = 0.7; // Noul verifikasi minimal agar fungsi dianggap hasil
 const VERIFY_COUNT = 6; // berapa simbol teratas yang diverifikasi (lebih banyak = hasil lebih lengkap)
 const MAX_ROUNDS = 8; // pengaman: jumlah request Jev maksimal
-const MAX_SNIPPET_LINES = 80; // potongan kode yang dikirim saat verifikasi
+const MAX_SNIPPET_LINES = 100; // potongan kode yang dikirim saat verifikasi
+const RETURN_LINES = 10; // kalau dipotong: berapa baris mulai dari return terakhir yang tetap dikirim
 const RELATED_POOL = 6; // kalau tidak ketemu: berapa kandidat "terdekat" yang dinilai di request terakhir
 const RELATED_COUNT = 3; // ...dan berapa yang dikembalikan
 
@@ -279,13 +280,33 @@ async function searchRound(query: string, list: Candidate[], tree: Tree) {
 
 // ---------- Verifikasi ----------
 
-/** Baca potongan kode asli sebuah simbol dari disk. */
-function snippet(root: string, candidate: Extract<Candidate, { kind: "symbol" }>): string {
-  const lines = readFileSync(join(root, candidate.file.path), "utf8").split("\n");
-  const { startLine, endLine } = candidate.symbol;
-  const end = Math.min(endLine, startLine + MAX_SNIPPET_LINES - 1);
-  const code = lines.slice(startLine - 1, end).join("\n");
-  return end < endLine ? code + `\n// … (${endLine - end} more lines)` : code;
+/**
+ * Baca kode asli sebuah simbol dari disk, dalam bentuk yang dikirim ke Jev saat verifikasi.
+ * Lebih dari MAX_SNIPPET_LINES: awal fungsi + RETURN_LINES baris mulai dari return terakhir, supaya Jev tetap tahu
+ * apa yang dikembalikan (return utama sering ada di tengah, misalnya kalau fungsinya diakhiri catch/throw).
+ * JSX komponen React sengaja tetap dikirim: tombol dan handler-nya bagian dari logika (lihat docs/03-search-loop.md).
+ */
+function codeOf(root: string, candidate: Extract<Candidate, { kind: "symbol" }>) {
+  const { file, symbol } = candidate;
+  const body = readFileSync(join(root, file.path), "utf8").split("\n").slice(symbol.startLine - 1, symbol.endLine);
+  const lineNo = (i: number) => symbol.startLine + i; // nomor baris asli dari indeks di body
+  const lastReturn = body.findLastIndex((t) => /^\s*return\b/.test(t));
+  const base = { file: file.path, name: symbol.name, lines: `${symbol.startLine}-${symbol.endLine}` };
+
+  if (body.length <= MAX_SNIPPET_LINES) return { ...base, code: body.join("\n") };
+
+  // Terlalu panjang: awal fungsi, lalu RETURN_LINES baris mulai dari return terakhir (atau baris-baris terakhir
+  // kalau tidak ada return / return-nya sudah terlihat di awal).
+  const headCount = MAX_SNIPPET_LINES - RETURN_LINES;
+  const from = lastReturn >= headCount ? lastReturn : body.length - RETURN_LINES;
+  const to = Math.min(from + RETURN_LINES, body.length);
+  const code = [
+    ...body.slice(0, headCount),
+    ...(from > headCount ? [`// … lines ${lineNo(headCount)}-${lineNo(from - 1)} omitted`] : []),
+    ...body.slice(from, to),
+    ...(to < body.length ? [`// … lines ${lineNo(to)}-${lineNo(body.length - 1)} omitted`] : []),
+  ];
+  return { ...base, code: code.join("\n") };
 }
 
 /** Pertanyaan verifikasi: apakah kode ini sendiri yang mengerjakan query? Dipakai verify() dan related(). */
@@ -321,10 +342,7 @@ async function verify(query: string, symbols: Extract<Candidate, { kind: "symbol
   const ids = symbols.map((_, i) => "C" + (i + 1));
   const state = {
     candidates: Object.fromEntries(
-      ids.map((id, i) => {
-        const { file, symbol } = symbols[i]!;
-        return [id, { file: file.path, name: symbol.name, lines: `${symbol.startLine}-${symbol.endLine}`, code: snippet(root, symbols[i]!) }];
-      }),
+      ids.map((id, i) => [id, codeOf(root, symbols[i]!)]),
     ),
   };
   const questions = Object.fromEntries(
@@ -372,7 +390,7 @@ async function related(query: string, candidates: Candidate[], tree: Tree, root:
       ids.map((id, i) => {
         const c = candidates[i]!;
         if (c.kind !== "symbol") return [id, describe(c, tree)];
-        return [id, { file: c.file.path, name: c.symbol.name, lines: `${c.symbol.startLine}-${c.symbol.endLine}`, code: snippet(root, c) }];
+        return [id, codeOf(root, c)];
       }),
     ),
   };
