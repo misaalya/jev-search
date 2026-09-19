@@ -14,7 +14,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { FileInfo, Index, SymbolInfo } from "./indexer.ts";
+import type { FileInfo, Index, SymbolInfo } from "./types.ts";
 import { askJev, type ChoiceAnswer, type NoulAnswer } from "./jev.ts";
 
 // ---------- Angka-angka yang bisa diatur ----------
@@ -290,6 +290,8 @@ function codeOf(root: string, candidate: Extract<Candidate, { kind: "symbol" }>)
   const { file, symbol } = candidate;
   const body = readFileSync(join(root, file.path), "utf8").split("\n").slice(symbol.startLine - 1, symbol.endLine);
   const lineNo = (i: number) => symbol.startLine + i; // nomor baris asli dari indeks di body
+  // "return" di awal baris cocok untuk kebanyakan bahasa. Bahasa dengan return implisit (Ruby, Rust) jatuh ke
+  // cadangan: baris-baris terakhir. Lihat docs/15-plugins.md.
   const lastReturn = body.findLastIndex((t) => /^\s*return\b/.test(t));
   const base = { file: file.path, name: symbol.name, lines: `${symbol.startLine}-${symbol.endLine}` };
 

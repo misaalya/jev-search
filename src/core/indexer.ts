@@ -8,59 +8,31 @@
  *   - simbol: fungsi, class, method, beserta signature, komentar, dan nomor barisnya
  *
  * Hasilnya disimpan sebagai JSON di dalam repo target (.jev-index.json), lalu dibaca oleh search.ts.
- * File ini: mendaftar file + membuat/memperbarui indeks. Pengurainya ada di parser.ts.
- * Lihat docs/02-indexer.md.
+ * File ini: mendaftar file + membuat/memperbarui indeks. Cara mengurai tiap bahasa ada di plugin bahasa
+ * (src/languages/), jadi file ini tidak tahu sintaks bahasa apa pun.
+ * Lihat docs/02-indexer.md dan docs/15-plugins.md.
  */
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
-
-// ---------- Bentuk data indeks ----------
-
-export type SymbolInfo = {
-  name: string; // contoh: "verifyToken" atau "AuthService.login"
-  kind: "function" | "class" | "method" | "module"; // module = seluruh file (file tanpa fungsi)
-  signature: string; // baris deklarasinya, dipendekkan
-  doc: string; // komentar di atasnya, dipendekkan ("" kalau tidak ada)
-  startLine: number; // 1-based, untuk ditampilkan: file.ts:12
-  endLine: number;
-  uses?: Uses; // jejak yang dipakai di dalamnya (lihat usesOf)
-};
-
-export type FileInfo = {
-  path: string; // relatif terhadap root repo, pakai "/"
-  mtimeMs: number; // waktu terakhir diubah, untuk mendeteksi perubahan (lihat updateIndex)
-  size: number; // ukuran dalam byte, juga untuk mendeteksi perubahan
-  doc: string; // komentar pembuka file
-  imports: string[]; // modul yang di-import, contoh: ["jose", "./session"]
-  symbols: SymbolInfo[];
-};
-
-export type Index = {
-  version: number; // lihat INDEX_VERSION
-  root: string; // path absolut repo saat diindeks
-  createdAt: string;
-  files: FileInfo[];
-};
-
-export type Uses = {
-  calls?: string[]; // fungsi/class yang dipanggil: createHmac, verifySessionToken, new Headers, <LoginForm>
-  properties?: string[]; // properti yang dibaca: headers.authorization, env.APP_SECRET
-  strings?: string[]; // teks pendek: "Bearer ", "Unauthorized"
-  numbers?: string[]; // angka ≥ 100: 401, 4096, 0o444
-  other?: string[]; // nama dari LUAR fungsi yang bukan panggilan/properti: SECRET, TTL_MS, regex
-};
+import { languages } from "../languages/index.ts";
+import type { FileInfo, Index, LanguagePlugin } from "./types.ts";
 
 export const INDEX_FILE = ".jev-index.json";
 
-// Naikkan setiap kali isi indeks berubah (misalnya aturan "uses"), supaya indeks lama diurai ulang semua
-// walaupun file-nya tidak berubah. 2 = kata kerja umum dicatat bersama objeknya (comments.delete).
+// Naikkan setiap kali isi indeks berubah (misalnya aturan "uses" di sebuah plugin bahasa), supaya indeks lama
+// diurai ulang semua walaupun file-nya tidak berubah. 2 = kata kerja umum dicatat bersama objeknya (comments.delete).
 export const INDEX_VERSION = 2;
 
-// Untuk prototype ini: hanya TypeScript/JavaScript (bahasa repo uji).
-// Bahasa lain nanti bisa ditambah dengan parser lain (misalnya tree-sitter).
-const CODE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
+/** Plugin bahasa untuk sebuah file, atau undefined kalau bahasanya belum didukung. */
+function languageOf(path: string): LanguagePlugin | undefined {
+  const ext = extname(path);
+  return languages.find((lang) => lang.extensions.includes(ext) && !lang.skip?.(path));
+}
+
+/** Semua ekstensi yang didukung, untuk pesan error. Contoh: ".ts .tsx .js". */
+export const SUPPORTED_EXTENSIONS = languages.flatMap((lang) => lang.extensions).join(" ");
 
 // Dipakai hanya saat menjelajah manual (kalau lewat git, .gitignore sudah menangani).
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", "build", ".next", "coverage"]);
@@ -86,7 +58,7 @@ function listFiles(root: string): string[] {
   // Bukan git repo, atau folder ini di-.gitignore oleh repo induknya (git tidak melihat apa pun):
   // jelajahi folder secara manual.
   if (paths.length === 0) paths = walk(root, "");
-  return paths.filter((p) => CODE_EXTENSIONS.has(extname(p)) && !p.endsWith(".d.ts")).sort();
+  return paths.filter((p) => languageOf(p) !== undefined).sort();
 }
 
 /** Cadangan kalau git tidak melihat file apa pun: jelajahi folder secara manual. */
@@ -111,7 +83,7 @@ export type IndexChanges = { added: number; updated: number; removed: number };
  *   Mengecek 248 file hanya ±1 ms.
  * - Aman dipakai ulang karena data tiap file berdiri sendiri: nama, komentar, dan `uses` semuanya
  *   diambil dari file itu saja. Perubahan di satu file tidak memengaruhi data file lain.
- * - Parser (paket `typescript`) hanya dimuat kalau ada yang perlu diurai.
+ * - Pengurai tiap bahasa hanya dimuat kalau ada file bahasa itu yang perlu diurai (lihat LanguagePlugin.load).
  * - Indeks dengan versi berbeda (INDEX_VERSION) otomatis dibuat ulang semua.
  */
 export async function updateIndex(root: string, old?: Index): Promise<{ index: Index; changes: IndexChanges }> {
@@ -134,11 +106,12 @@ export async function updateIndex(root: string, old?: Index): Promise<{ index: I
   if (old && changed.length === 0 && removed === 0) return { index: { ...old, root }, changes };
 
   const fresh = new Map<string, FileInfo>();
-  if (changed.length > 0) {
-    const { parseFile } = await import("./parser.ts");
-    for (const f of changed) {
-      fresh.set(f.path, { ...parseFile(f.path, readFileSync(join(root, f.path), "utf8")), mtimeMs: f.mtimeMs, size: f.size });
-    }
+  const parsers = new Map<LanguagePlugin, Awaited<ReturnType<LanguagePlugin["load"]>>>();
+  for (const f of changed) {
+    const lang = languageOf(f.path)!; // listFiles hanya mengembalikan file yang punya plugin
+    if (!parsers.has(lang)) parsers.set(lang, await lang.load());
+    const parsed = parsers.get(lang)!.parseFile(f.path, readFileSync(join(root, f.path), "utf8"));
+    fresh.set(f.path, { ...parsed, mtimeMs: f.mtimeMs, size: f.size });
   }
   const files = current.map((f) => fresh.get(f.path) ?? previous.get(f.path)!);
   const index: Index = { version: INDEX_VERSION, root, createdAt: new Date().toISOString(), files };

@@ -27,3 +27,6 @@ jev-search search path/ke/repo "code responsible for authentication"
 ```
 
 Query ditulis dalam bahasa Inggris. Butuh [Bun](https://bun.sh) ≥ 1.3.
+
+Bahasa yang didukung: TypeScript/JavaScript (termasuk JSX/TSX). Setiap bahasa adalah plugin di `src/languages/`;
+bagian inti (`src/core/`) tidak bergantung pada bahasa apa pun.

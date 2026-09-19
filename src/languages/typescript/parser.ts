@@ -1,12 +1,12 @@
 /**
- * PARSER — mengurai satu file TS/JS menjadi daftar simbol (fungsi, class, method) + jejak "uses".
+ * PARSER TypeScript/JavaScript — mengurai satu file menjadi daftar simbol (fungsi, class, method) + jejak "uses".
  *
- * Dipisah dari indexer.ts karena paket `typescript` berat dimuat (±250–400 ms). indexer.ts hanya
- * memuat file ini kalau memang ada file yang perlu diurai. Lihat docs/02-indexer.md.
+ * Dipisah dari index.ts plugin ini karena paket `typescript` berat dimuat (±250–400 ms). Indexer hanya
+ * memuat file ini kalau memang ada file TS/JS yang perlu diurai. Lihat docs/02-indexer.md.
  */
 
 import ts from "typescript";
-import type { FileInfo, SymbolInfo, Uses } from "./indexer.ts";
+import type { ParsedFile, SymbolInfo, Uses } from "../../core/types.ts";
 
 // Batas panjang teks supaya ringkasan tetap kecil (Jev lebih akurat dengan state yang ringkas).
 const MAX_SIGNATURE = 140;
@@ -184,8 +184,8 @@ function usesOf(node: ts.Node): Uses | undefined {
   return Object.keys(result).length ? result : undefined;
 }
 
-/** Urai satu file. Waktu ubah & ukuran file (mtimeMs, size) diisi oleh indexer.ts. */
-export function parseFile(path: string, code: string): Omit<FileInfo, "mtimeMs" | "size"> {
+/** Urai satu file. Waktu ubah & ukuran file (mtimeMs, size) diisi oleh indexer. */
+export function parseFile(path: string, code: string): ParsedFile {
   const source = ts.createSourceFile(path, code, ts.ScriptTarget.Latest, true);
   const symbols: SymbolInfo[] = [];
   const imports: string[] = [];

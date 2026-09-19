@@ -18,8 +18,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseEnv } from "node:util";
-import { INDEX_FILE, updateIndex, type Index } from "./indexer.ts";
-import { search } from "./search.ts";
+import { INDEX_FILE, SUPPORTED_EXTENSIONS, updateIndex } from "./core/indexer.ts";
+import { search } from "./core/search.ts";
+import type { Index } from "./core/types.ts";
 
 // .env diambil dari folder proyek jev-search ini (bukan dari repo yang dicari).
 // Bun hanya otomatis membaca .env di folder saat ini, jadi kita baca sendiri.
@@ -75,7 +76,7 @@ if (command === "index") {
 
   const index = await loadIndex(root);
   if (index.files.length === 0) {
-    console.error(`No code files found in ${root}. Supported: .ts .tsx .js .jsx .mjs .cjs`);
+    console.error(`No code files found in ${root}. Supported: ${SUPPORTED_EXTENSIONS}`);
     process.exit(1);
   }
   const result = await search(query, index);
