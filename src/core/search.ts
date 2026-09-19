@@ -27,7 +27,7 @@ const WIDE_BEAM = 4; // ...kalau Jev sedang ragu
 const LOW_CONFIDENCE = 0.5; // di bawah ini = Jev ragu
 const STILL_POSSIBLE = 0.01; // peluang ≥ ini (bukan 0) ikut beam sampai WIDE_BEAM; Jev membulatkan ke 0.01
 const EXISTS_MIN = 0.3; // Noul "exists" di bawah ini = tidak ada yang relevan
-const VERIFY_MIN = 0.7; // Noul verifikasi minimal agar fungsi dianggap hasil
+export const VERIFY_MIN = 0.7; // Noul verifikasi minimal agar fungsi dianggap hasil
 const VERIFY_COUNT = 6; // berapa simbol teratas yang diverifikasi (lebih banyak = hasil lebih lengkap)
 const MAX_ROUNDS = 8; // pengaman: jumlah request Jev maksimal
 const MAX_SNIPPET_LINES = 100; // potongan kode yang dikirim saat verifikasi
@@ -432,7 +432,11 @@ async function related(query: string, candidates: Candidate[], tree: Tree, root:
 
 // ---------- Loop utama ----------
 
-export async function search(query: string, index: Index): Promise<SearchResult> {
+/**
+ * onProgress: dipanggil sebelum setiap request Jev dengan keterangan singkat (bahasa Inggris), untuk animasi
+ * loading di terminal. Tidak memengaruhi pencarian.
+ */
+export async function search(query: string, index: Index, onProgress: (text: string) => void = () => {}): Promise<SearchResult> {
   const started = performance.now();
   const tree = buildTree(index);
   const steps: Step[] = [];
@@ -449,8 +453,8 @@ export async function search(query: string, index: Index): Promise<SearchResult>
       hits.length > 0
         ? "Found code that implements this."
         : partial
-          ? "No single piece of code does all of this, but parts of it were found; see related (parts listed first)."
-          : "No code implements this. The related entries are only the closest code, not a match.",
+          ? "No single piece of code does all of this, but the parts that do one piece of it were found (listed with their code)."
+          : "No code implements this. The closest code is listed only as a hint, not a match.",
     hits,
     related: relatedItems,
     steps,
@@ -478,6 +482,7 @@ export async function search(query: string, index: Index): Promise<SearchResult>
       const symbols = list.filter((c) => !verified.has(keyOf(c))) as Extract<Candidate, { kind: "symbol" }>[];
       symbols.forEach((c) => verified.add(keyOf(c)));
       if (symbols.length > 0) {
+        onProgress(`round ${round}: reading the code of ${symbols.length} function${symbols.length > 1 ? "s" : ""}`);
         const { result, scores, mains } = await verify(query, symbols, index.root);
         steps.push({
           round,
@@ -515,6 +520,7 @@ export async function search(query: string, index: Index): Promise<SearchResult>
 
     // ---- Tahap PENELUSURAN: tanya Jev mana yang paling cocok.
     lastSearchList = list;
+    onProgress(`round ${round}: choosing among ${list.length} candidates`);
     const { result, where, exists, ranked, closest } = await searchRound(query, list, tree);
     closestSeen.push(...closest);
     const top = ranked.slice(0, 3).map((r) => `${label(r.candidate)}=${r.p.toFixed(2)}`).join("  ");
@@ -580,6 +586,7 @@ export async function search(query: string, index: Index): Promise<SearchResult>
   ];
   const pool = ordered.filter((c, i) => ordered.findIndex((o) => keyOf(o) === keyOf(c)) === i).slice(0, RELATED_POOL);
   if (pool.length === 0) return finish([]);
+  onProgress("no clear match: checking the closest code");
   const { result, items } = await related(query, pool, tree, index.root);
   // Pertanyaan "implements" di sini sama dengan verifikasi (kode asli dibaca). Jadi simbol yang lolos batas
   // tetap dijadikan hasil. Terjadi kalau pencarian berhenti tanpa verifikasi (misalnya CEK 1 karena nama

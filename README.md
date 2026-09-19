@@ -6,16 +6,23 @@ menelusuri repo (folder → file → fungsi) dan menunjukkan lokasinya.
 ```bash
 bun install && cp .env.example .env   # isi TYPESAFE_API_KEY
 bun src/cli.ts search path/ke/repo "code responsible for authentication"
-# app/api/auth/login/route.ts:36-107  POST  (0.96)
+# status: found
+# ## lib/server/auth/session.ts:116-136  verifySessionToken  (implements 0.93, main 0.36)
+# ```ts
+# ...kode aslinya...
 ```
+
+Keluarannya dibuat untuk agent (LLM): kode hasilnya langsung ikut dicetak, jadi agent tidak perlu membaca file
+yang sama lagi.
 
 Perintah:
 
 ```bash
 bun src/cli.ts search [repo] "<query>"        # cari kode; indeks (.jev-index.json) dibuat/diperbarui otomatis
 bun src/cli.ts index  [repo]                  # buat ulang indeks dari nol (biasanya tidak perlu)
-  --json      # keluaran JSON untuk agent: status found/partial/not_found, message, hits, related
-  --verbose   # tampilkan setiap putaran Jev
+  --md        # keluaran Markdown (default): status, lalu tiap hasil dengan kodenya
+  --json      # keluaran JSON: status, message, hits, related (+ code)
+  --verbose   # tampilkan setiap putaran Jev (ke stderr)
 ```
 
 Urutannya selalu: perintah (`search`/`index`) dulu, lalu path repo, lalu query.
